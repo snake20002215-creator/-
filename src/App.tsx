@@ -1,5 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
+import { auth, googleProvider } from './firebase';
 import { 
   Palette, 
   Search, 
@@ -146,6 +148,38 @@ export default function App() {
 
   // --- Admin State ---
   const [editingCommission, setEditingCommission] = useState<Commission | null>(null);
+
+  // --- Auth State ---
+  const [user, setUser] = useState<User | null>(null);
+  const isAdmin = user?.email === 'snake20002215@gmail.com';
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleGoogleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      toast.success('登入成功');
+    } catch (error: any) {
+      console.error(error);
+      toast.error('登入失敗: ' + error.message);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      toast.success('已登出');
+      setView('home');
+    } catch (error: any) {
+      console.error(error);
+      toast.error('登出失敗: ' + error.message);
+    }
+  };
 
   // --- Actions ---
   const handleFormSubmit = () => {
@@ -960,6 +994,29 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="max-w-6xl mx-auto space-y-8"
             >
+              {!isAdmin ? (
+                <Card className="max-w-md mx-auto mt-20">
+                  <CardHeader>
+                    <CardTitle className="text-center">管理員登入</CardTitle>
+                    <CardDescription className="text-center">請使用授權的 Google 帳號登入以存取後台</CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-col items-center space-y-4">
+                    {user && !isAdmin && (
+                      <div className="text-sm text-destructive bg-destructive/10 p-3 rounded-md text-center">
+                        目前登入的帳號 ({user.email}) 沒有管理員權限。
+                      </div>
+                    )}
+                    <Button onClick={handleGoogleLogin} className="w-full">
+                      使用 Google 登入
+                    </Button>
+                    {user && (
+                      <Button variant="outline" onClick={handleLogout} className="w-full">
+                        登出當前帳號
+                      </Button>
+                    )}
+                  </CardContent>
+                </Card>
+              ) : (
                 <div className="space-y-8">
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div className="space-y-1">
@@ -978,6 +1035,7 @@ export default function App() {
                           {appData.settings.isCommissionOpen ? 'Open' : 'Closed'}
                         </span>
                       </div>
+                      <Button variant="outline" onClick={handleLogout}>登出</Button>
                     </div>
                   </div>
 
@@ -1131,23 +1189,12 @@ export default function App() {
                               onCheckedChange={toggleCommissionOpen}
                             />
                           </div>
-                          <Separator />
-                          <div className="space-y-2">
-                            <Label>管理員密碼</Label>
-                            <div className="flex space-x-2">
-                              <Input 
-                                type="password" 
-                                value={appData.settings.adminPasswordHash}
-                                onChange={e => setAppData({...appData, settings: {...appData.settings, adminPasswordHash: e.target.value}})}
-                              />
-                              <Button variant="outline" onClick={() => toast.success('密碼已更新')}>更新</Button>
-                            </div>
-                          </div>
                         </CardContent>
                       </Card>
                     </TabsContent>
                   </Tabs>
                 </div>
+              )}
             </motion.div>
           )}
 
