@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { auth, googleProvider } from './firebase';
+import { doc, setDoc, getDoc, collection, onSnapshot, updateDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
+import { auth, googleProvider, db } from './firebase';
 import { 
   Palette, 
   Search, 
@@ -51,32 +52,8 @@ import {
   TableRow 
 } from '@/components/ui/table';
 
-import { Commission, AppData, CommissionStatus } from './types';
+import { Commission, CommissionStatus } from './types';
 import { STATUS_NODES, COMMISSION_TYPES, DEFAULT_ADMIN_PASSWORD } from './constants';
-
-// --- Custom Hook for LocalStorage ---
-function useLocalStorage<T>(key: string, initialValue: T): [T, (value: T) => void] {
-  const [storedValue, setStoredValue] = useState<T>(() => {
-    try {
-      const item = window.localStorage.getItem(key);
-      return item ? JSON.parse(item) : initialValue;
-    } catch (error) {
-      console.error(error);
-      return initialValue;
-    }
-  });
-
-  const setValue = (value: T) => {
-    try {
-      setStoredValue(value);
-      window.localStorage.setItem(key, JSON.stringify(value));
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
-  return [storedValue, setValue];
-}
 
 // --- Main App Component ---
 export default function App() {
@@ -100,13 +77,10 @@ export default function App() {
   ];
 
   const [view, setView] = useState<'home' | 'form' | 'track' | 'portfolio' | 'admin' | 'info'>('home');
-  const [appData, setAppData] = useLocalStorage<AppData>('artcomms_data', {
-    commissions: [],
-    settings: {
-      isCommissionOpen: true,
-      adminPasswordHash: DEFAULT_ADMIN_PASSWORD
-    }
-  });
+  
+  // --- Firebase Data State ---
+  const [commissions, setCommissions] = useState<Commission[]>([]);
+  const [isCommissionOpen, setIsCommissionOpen] = useState(true);
 
   // --- Form State ---
   const [formStep, setFormStep] = useState(1);
@@ -149,7 +123,7 @@ export default function App() {
   // --- Admin State ---
   const [editingCommission, setEditingCommission] = useState<Commission | null>(null);
 
-  // --- Auth State ---
+  // --- Auth & Data Fetching ---
   const [user, setUser] = useState<User | null>(null);
   const isAdmin = user?.email === 'snake20002215@gmail.com';
 
@@ -159,6 +133,37 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  // Fetch global settings
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'settings', 'global'), (docSnap) => {
+      if (docSnap.exists()) {
+        setIsCommissionOpen(docSnap.data().isCommissionOpen);
+      }
+    }, (error) => {
+      console.error("Error fetching settings:", error);
+    });
+    return () => unsub();
+  }, []);
+
+  // Fetch commissions (Admin only)
+  useEffect(() => {
+    if (isAdmin) {
+      const unsub = onSnapshot(collection(db, 'commissions'), (snapshot) => {
+        const comms: Commission[] = [];
+        snapshot.forEach(doc => {
+          comms.push({ id: doc.id, ...doc.data() } as Commission);
+        });
+        comms.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        setCommissions(comms);
+      }, (error) => {
+        console.error("Error fetching commissions:", error);
+      });
+      return () => unsub();
+    } else {
+      setCommissions([]);
+    }
+  }, [isAdmin]);
 
   const handleGoogleLogin = async () => {
     try {
@@ -182,7 +187,7 @@ export default function App() {
   };
 
   // --- Actions ---
-  const handleFormSubmit = () => {
+  const handleFormSubmit = async () => {
     const newId = `TEMP${Math.floor(10000 + Math.random() * 90000)}`;
     const newCommission: Commission = {
       id: newId,
@@ -191,53 +196,98 @@ export default function App() {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
-
-    setAppData({
-      ...appData,
-      commissions: [newCommission, ...appData.commissions]
-    });
-    setTempId(newId);
-    setFormStep(3);
+    
+    try {
+      await setDoc(doc(db, 'commissions', newId), newCommission);
+      setTempId(newId);
+      setFormStep(3);
+      toast.success('訂單已送出！');
+    } catch (error: any) {
+      console.error(error);
+      toast.error('送出失敗: ' + error.message);
+    }
   };
 
-  const handleSearch = () => {
-    const found = appData.commissions.find(c => c.id === searchId || c.officialId === searchId);
-    if (found) {
-      setTrackedCommission(found);
-    } else {
-      toast.error('找不到該編號的訂單');
+  const handleSearch = async () => {
+    if (!searchId) return;
+    try {
+      // 1. Try searching by document ID (TEMP...)
+      const docRef = doc(db, 'commissions', searchId);
+      const docSnap = await getDoc(docRef);
+      
+      if (docSnap.exists()) {
+        setTrackedCommission({ id: docSnap.id, ...docSnap.data() } as Commission);
+        return;
+      } 
+      
+      // 2. Try searching by officialId
+      const q = query(collection(db, 'commissions'), where('officialId', '==', searchId));
+      const querySnapshot = await getDocs(q);
+      
+      if (!querySnapshot.empty) {
+        const docSnap = querySnapshot.docs[0];
+        setTrackedCommission({ id: docSnap.id, ...docSnap.data() } as Commission);
+        return;
+      }
+
+      toast.error('找不到該訂單編號');
+      setTrackedCommission(null);
+      
+    } catch (error: any) {
+      console.error(error);
+      toast.error('查詢失敗: ' + error.message);
       setTrackedCommission(null);
     }
   };
 
-  const updateCommissionStatus = (id: string, status: CommissionStatus) => {
-    const updated = appData.commissions.map(c => 
-      c.id === id ? { ...c, status, updatedAt: new Date().toISOString() } : c
-    );
-    setAppData({ ...appData, commissions: updated });
-    toast.success('狀態已更新');
+  const updateCommissionStatus = async (id: string, status: CommissionStatus) => {
+    try {
+      await updateDoc(doc(db, 'commissions', id), {
+        status,
+        updatedAt: new Date().toISOString()
+      });
+      toast.success('狀態已更新');
+    } catch (error: any) {
+      console.error(error);
+      toast.error('更新失敗: ' + error.message);
+    }
   };
 
-  const updateCommissionOfficialId = (id: string, officialId: string) => {
-    const updated = appData.commissions.map(c => 
-      c.id === id ? { ...c, officialId, updatedAt: new Date().toISOString() } : c
-    );
-    setAppData({ ...appData, commissions: updated });
-    toast.success('正式編號已更新');
+  const updateCommissionOfficialId = async (id: string, officialId: string) => {
+    try {
+      await updateDoc(doc(db, 'commissions', id), {
+        officialId,
+        updatedAt: new Date().toISOString()
+      });
+      toast.success('正式編號已更新');
+    } catch (error: any) {
+      console.error(error);
+      toast.error('更新失敗: ' + error.message);
+    }
   };
 
-  const deleteCommission = (id: string) => {
-    const updated = appData.commissions.filter(c => c.id !== id);
-    setAppData({ ...appData, commissions: updated });
-    toast.success('訂單已刪除');
+  const deleteCommission = async (id: string) => {
+    if (window.confirm('確定要刪除此訂單嗎？此操作無法復原。')) {
+      try {
+        await deleteDoc(doc(db, 'commissions', id));
+        toast.success('訂單已刪除');
+      } catch (error: any) {
+        console.error(error);
+        toast.error('刪除失敗: ' + error.message);
+      }
+    }
   };
 
-  const toggleCommissionOpen = (open: boolean) => {
-    setAppData({
-      ...appData,
-      settings: { ...appData.settings, isCommissionOpen: open }
-    });
-    toast.info(open ? '委託已開啟' : '委託已關閉');
+  const toggleCommissionOpen = async (open: boolean) => {
+    try {
+      await setDoc(doc(db, 'settings', 'global'), {
+        isCommissionOpen: open
+      }, { merge: true });
+      toast.success(`委託已${open ? '開啟' : '關閉'}`);
+    } catch (error: any) {
+      console.error(error);
+      toast.error('設定更新失敗: ' + error.message);
+    }
   };
 
   // --- Render Helpers ---
@@ -366,8 +416,8 @@ export default function App() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                 <Card 
-                  className={`group cursor-pointer hover:shadow-2xl transition-all border border-border bg-card/50 ${!appData.settings.isCommissionOpen ? 'opacity-70 grayscale' : 'hover:border-primary/50'}`}
-                  onClick={() => appData.settings.isCommissionOpen && setView('form')}
+                  className={`group cursor-pointer hover:shadow-2xl transition-all border border-border bg-card/50 ${!isCommissionOpen ? 'opacity-70 grayscale' : 'hover:border-primary/50'}`}
+                  onClick={() => isCommissionOpen && setView('form')}
                 >
                   <CardHeader className="space-y-4">
                     <div className="w-12 h-12 rounded-full border border-primary/20 flex items-center justify-center group-hover:bg-primary group-hover:text-primary-foreground transition-all duration-500">
@@ -375,7 +425,7 @@ export default function App() {
                     </div>
                     <CardTitle className="text-2xl text-primary">訂單填寫</CardTitle>
                     <CardDescription className="text-muted-foreground">
-                      {appData.settings.isCommissionOpen ? '開始您的委託申請流程' : '目前暫停接單中'}
+                      {isCommissionOpen ? '開始您的委託申請流程' : '目前暫停接單中'}
                     </CardDescription>
                   </CardHeader>
                 </Card>
@@ -420,7 +470,7 @@ export default function App() {
                 </Card>
               </div>
 
-              {!appData.settings.isCommissionOpen && (
+              {!isCommissionOpen && (
                 <div className="p-4 bg-destructive/10 border border-destructive/20 rounded-xl inline-flex items-center space-x-2 text-destructive">
                   <AlertCircle className="w-5 h-5" />
                   <span className="font-medium">目前暫停接單中，歡迎追蹤進度或瀏覽作品。</span>
@@ -438,7 +488,22 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="max-w-2xl mx-auto space-y-8"
             >
-              <div className="flex items-center justify-between">
+              {!isCommissionOpen ? (
+                <Card className="text-center py-12">
+                  <CardContent className="space-y-4">
+                    <div className="w-16 h-16 bg-destructive/10 text-destructive rounded-full flex items-center justify-center mx-auto mb-4">
+                      <AlertCircle className="w-8 h-8" />
+                    </div>
+                    <h2 className="text-2xl font-bold">目前暫停接單中</h2>
+                    <p className="text-muted-foreground">
+                      很抱歉，目前委託已經關閉，無法填寫新訂單。請留意後續開放公告。
+                    </p>
+                    <Button onClick={() => setView('home')} className="mt-4">返回首頁</Button>
+                  </CardContent>
+                </Card>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between">
                 <Button variant="ghost" onClick={() => setView('home')}>
                   <ArrowLeft className="w-4 h-4 mr-2" /> 返回
                 </Button>
@@ -583,6 +648,8 @@ export default function App() {
                   </CardFooter>
                 </Card>
               )}
+            </>
+            )}
             </motion.div>
           )}
 
@@ -1028,11 +1095,11 @@ export default function App() {
                         <Label htmlFor="open-toggle" className="text-sm font-medium">委託狀態</Label>
                         <Switch 
                           id="open-toggle" 
-                          checked={appData.settings.isCommissionOpen}
+                          checked={isCommissionOpen}
                           onCheckedChange={toggleCommissionOpen}
                         />
                         <span className="text-xs font-bold uppercase">
-                          {appData.settings.isCommissionOpen ? 'Open' : 'Closed'}
+                          {isCommissionOpen ? 'Open' : 'Closed'}
                         </span>
                       </div>
                       <Button variant="outline" onClick={handleLogout}>登出</Button>
@@ -1059,14 +1126,14 @@ export default function App() {
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {appData.commissions.length === 0 ? (
+                            {commissions.length === 0 ? (
                               <TableRow>
                                 <TableCell colSpan={6} className="text-center py-10 text-muted-foreground">
                                   目前尚無訂單
                                 </TableCell>
                               </TableRow>
                             ) : (
-                              appData.commissions.map((c) => (
+                              commissions.map((c) => (
                                 <TableRow key={c.id}>
                                   <TableCell className="font-mono text-xs">
                                     {c.officialId ? (
@@ -1185,7 +1252,7 @@ export default function App() {
                               <p className="text-xs text-muted-foreground">控制前台是否可以填寫新訂單</p>
                             </div>
                             <Switch 
-                              checked={appData.settings.isCommissionOpen}
+                              checked={isCommissionOpen}
                               onCheckedChange={toggleCommissionOpen}
                             />
                           </div>

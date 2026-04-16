@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isAdmin() {
+      return request.auth != null && 
+             request.auth.token.email == 'snake20002215@gmail.com' &&
+             request.auth.token.email_verified == true;
+    }
+
+    match /commissions/{commissionId} {
+      allow create: if true; 
+      allow get: if true;
+      // Allow users to query by officialId
+      allow list: if isAdmin() || (
+        request.query.limit <= 1
+      );
+      allow update, delete: if isAdmin();
+    }
+
+    match /settings/{document=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
